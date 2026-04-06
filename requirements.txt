@@ -1,0 +1,7 @@
+streamlit
+faster-whisper
+gtts
+langdetect
+google-generativeai
+pydub
+ffmpeg-python
