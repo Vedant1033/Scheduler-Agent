@@ -1,251 +1,131 @@
+import os
 import streamlit as st
-import tempfile
-import requests
-import io
-import re
-from PIL import Image
-from faster_whisper import WhisperModel
-from gtts import gTTS
-import pyttsx3
 from streamlit_mic_recorder import mic_recorder
 
-from langgraph.graph import StateGraph
-from typing import TypedDict, Optional, Dict
+from UI.styles import GLOBAL_CSS
+from UI.components import (
+    render_header,
+    render_orb,
+    render_chat_history,
+    render_policy_card,
+    render_low_confidence_warning,
+    render_footer,
+)
+from utils.speech import transcribe_audio, text_to_speech
+from agents.voice_agent import graph
 
-# ---------------- CONFIG ----------------
-API_URL = "http://127.0.0.1:8000/process"  # change if needed
-
-whisper_model = WhisperModel("base")
-engine = pyttsx3.init()
-
-# ---------------- UI STYLE ----------------
-st.set_page_config(page_title="AI Voice Agent", layout="centered")
-
-st.markdown("""
-<style>
-.chat-box {
-    background: #1e293b;
-    padding: 15px;
-    border-radius: 12px;
-    margin-top: 10px;
-    color: white;
-}
-.mic {
-    width: 70px;
-    height: 70px;
-    background: #2563eb;
-    border-radius: 50%;
-    margin: auto;
-    animation: pulse 1.5s infinite;
-}
-@keyframes pulse {
-    0% { box-shadow: 0 0 0 0 rgba(37,99,235,0.7); }
-    70% { box-shadow: 0 0 0 20px rgba(37,99,235,0); }
-}
-.speaking {
-    animation: wave 1s infinite;
-}
-@keyframes wave {
-    50% { transform: scale(1.08); }
-}
-</style>
-""", unsafe_allow_html=True)
-
-# ---------------- FUNCTIONS ----------------
-
-def transcribe(audio_path):
-    segments, info = whisper_model.transcribe(audio_path)
-    text = "".join([seg.text for seg in segments])
-    return text.strip(), info.language
-
-
-def speak(text, lang):
-    if not text:
-        text = "Sorry, I could not understand."
-
-    file = "response.mp3"
-
-    try:
-        gTTS(text=text, lang=lang if lang in ["hi","mr","en"] else "en").save(file)
-        return file
-    except:
-        pass
-
-    try:
-        engine.save_to_file(text, file)
-        engine.runAndWait()
-        return file
-    except:
-        return None
-
-
-def call_backend(text):
-    try:
-        payload = {"prompt": text, "ocr_text": ""}
-        res = requests.post(API_URL, json=payload, timeout=8)
-        data = res.json()
-        return data.get("response") or str(data)
-    except:
-        return "Backend not reachable"
-
-
-def generate_with_image(image, prompt):
-    try:
-        buffer = io.BytesIO()
-        image.save(buffer, format="JPEG")
-        buffer.seek(0)
-
-        res = requests.post(
-            "http://192.168.0.95:8090/openai_generate_image",
-            params={"prompt": prompt},
-            files={"file": ("image.jpg", buffer, "image/jpeg")}
-        )
-        return res.json().get("response")
-    except:
-        return "Image processing failed"
-
-# ---------------- LANGGRAPH ----------------
-
-class AgentState(TypedDict):
-    text: str
-    intent: str
-    response: str
-    appointment: Optional[Dict]
-
-
-def detect_intent_node(state):
-    t = state["text"].lower()
-
-    reschedule = [r"\breschedule\b", r"\bchange\b", r"\bmove\b", r"\bshift\b", r"\bpostpone\b"]
-    schedule = [r"\bschedule\b", r"\bbook\b", r"\bfix\b", r"\bset up\b", r"\barrange\b"]
-    query = [r"\bwhen\b.*\bappointment\b", r"\bmy appointment\b"]
-    cancel = [r"\bcancel\b", r"\bdelete\b"]
-
-    for p in reschedule:
-        if re.search(p, t): return {**state, "intent": "reschedule"}
-
-    for p in schedule:
-        if re.search(p, t): return {**state, "intent": "schedule"}
-
-    for p in query:
-        if re.search(p, t): return {**state, "intent": "query"}
-
-    for p in cancel:
-        if re.search(p, t): return {**state, "intent": "cancel"}
-
-    return {**state, "intent": "unknown"}
-
-
-def schedule_node(state):
-    return {
-        **state,
-        "appointment": {"date": "tomorrow", "time": "10 AM"},
-        "response": "Appointment scheduled for tomorrow at 10 AM."
-    }
-
-
-def reschedule_node(state):
-    if state.get("appointment"):
-        return {
-            **state,
-            "appointment": {"date": "Friday", "time": "5 PM"},
-            "response": "Appointment rescheduled to Friday at 5 PM."
-        }
-    return {**state, "response": "No appointment found."}
-
-
-def query_node(state):
-    appt = state.get("appointment")
-    if appt:
-        return {**state, "response": f"Your appointment is on {appt['date']} at {appt['time']}."}
-    return {**state, "response": "No appointment scheduled."}
-
-
-def cancel_node(state):
-    if state.get("appointment"):
-        return {**state, "appointment": None, "response": "Appointment cancelled."}
-    return {**state, "response": "No appointment to cancel."}
-
-
-def default_node(state):
-    return {**state, "response": call_backend(state["text"])}
-
-
-builder = StateGraph(AgentState)
-
-builder.add_node("intent", detect_intent_node)
-builder.add_node("schedule", schedule_node)
-builder.add_node("reschedule", reschedule_node)
-builder.add_node("query", query_node)
-builder.add_node("cancel", cancel_node)
-builder.add_node("default", default_node)
-
-builder.set_entry_point("intent")
-
-builder.add_conditional_edges(
-    "intent",
-    lambda s: s["intent"],
-    {
-        "schedule": "schedule",
-        "reschedule": "reschedule",
-        "query": "query",
-        "cancel": "cancel",
-        "unknown": "default"
-    }
+# ─────────────────────────────────────────
+# PAGE CONFIG
+# ─────────────────────────────────────────
+st.set_page_config(
+    page_title="Voice Agent",
+    page_icon="🔮",
+    layout="centered",
+    initial_sidebar_state="collapsed",
 )
 
-builder.set_finish_point("schedule")
-builder.set_finish_point("reschedule")
-builder.set_finish_point("query")
-builder.set_finish_point("cancel")
-builder.set_finish_point("default")
+st.markdown(GLOBAL_CSS, unsafe_allow_html=True)  # fix: was STYLES
 
-graph = builder.compile()
-
-# ---------------- UI ----------------
-
-st.title("🎤 AI Voice Agent")
-
-if "state" not in st.session_state:
-    st.session_state["state"] = {
-        "text": "", "intent": "", "response": "", "appointment": None
+# ─────────────────────────────────────────
+# SESSION STATE INIT
+# ─────────────────────────────────────────
+if "agent_state" not in st.session_state:
+    st.session_state.agent_state = {
+        "text": "", "intent": "", "response": "",
+        "lang": "en", "confidence": 0.0,
+        "appointment": None, "policy": None, "history": [],
     }
+if "orb_state" not in st.session_state:
+    st.session_state.orb_state = "idle"
 
-if "greeted" not in st.session_state:
-    st.session_state["greeted"] = True
-    greet = "Hello! I can schedule, reschedule, cancel or check your appointment."
-    st.markdown(f"<div class='chat-box'>{greet}</div>", unsafe_allow_html=True)
-    st.audio(speak(greet, "en"))
+# ─────────────────────────────────────────
+# UI LAYOUT
+# ─────────────────────────────────────────
+st.markdown(render_header(), unsafe_allow_html=True)
+st.markdown(render_orb(st.session_state.orb_state), unsafe_allow_html=True)
 
-st.markdown("<div class='mic'></div>", unsafe_allow_html=True)
+st.markdown("<div class='scan-line'></div>", unsafe_allow_html=True)
 
-img_file = st.file_uploader("Upload Image (optional)")
-image = Image.open(img_file) if img_file else None
+# Chat history
+history = st.session_state.agent_state.get("history", [])
+if history:
+    st.markdown(render_chat_history(history), unsafe_allow_html=True)  # fix: was render_history
 
-audio = mic_recorder(start_prompt="🎤 Speak", stop_prompt="⏹️ Stop")
+# Policy card
+pol = st.session_state.agent_state.get("policy")
+if pol:
+    st.markdown(render_policy_card(pol), unsafe_allow_html=True)
 
-if audio:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        tmp.write(audio["bytes"])
-        path = tmp.name
+st.markdown("<div class='scan-line'></div>", unsafe_allow_html=True)
 
-    text, lang = transcribe(path)
+# Controls row
+col1, col2 = st.columns([4, 1])
+with col2:
+    if st.button("🗑 Clear"):
+        st.session_state.agent_state["history"] = []
+        st.session_state.agent_state["policy"] = None
+        st.session_state.orb_state = "idle"
+        st.rerun()
 
-    st.markdown(f"<div class='chat-box'><b>You:</b><br>{text}</div>", unsafe_allow_html=True)
+st.markdown("#### 🎤 Tap to speak")
+audio = mic_recorder(
+    start_prompt="Hold & Speak",
+    stop_prompt="Release to Send",
+    key="mic",
+)
 
-    state = st.session_state["state"]
-    state["text"] = text
+# ─────────────────────────────────────────
+# PROCESS AUDIO
+# ─────────────────────────────────────────
+if audio and audio.get("bytes"):
+    st.session_state.orb_state = "thinking"
 
-    result = graph.invoke(state)
-    st.session_state["state"] = result
+    # STT
+    try:
+        text, lang, conf = transcribe_audio(audio["bytes"])
+    except Exception:
+        text, lang, conf = "", "en", -2.0
 
-    response = result.get("response", "Error")
+    if not text:
+        conf = -2.0
 
-    if image:
-        response = generate_with_image(image, text)
+    # Update state and run graph
+    state = st.session_state.agent_state
+    state.update({"text": text, "lang": lang, "confidence": conf})
 
-    st.markdown(f"<div class='chat-box speaking'><b>Bot:</b><br>{response}</div>", unsafe_allow_html=True)
+    try:
+        result = graph.invoke(state)
+    except Exception as e:
+        result = {**state, "intent": "error", "response": f"Agent error: {e}"}
 
-    audio_out = speak(response, lang)
-    if audio_out:
-        st.audio(audio_out)
+    response = result.get("response", "Sorry, I encountered an error.")
+
+    # Append to history
+    hist = result.get("history", [])
+    if text:
+        hist.append({"role": "user", "text": text, "intent": None})
+    hist.append({"role": "bot", "text": response, "intent": result.get("intent", "")})
+    result["history"] = hist
+
+    st.session_state.agent_state = result
+    st.session_state.orb_state = "speaking"
+
+    # TTS playback
+    audio_path = text_to_speech(response, lang)
+    if audio_path:
+        with open(audio_path, "rb") as f:
+            st.audio(f.read(), format="audio/mp3", autoplay=True)
+        os.unlink(audio_path)
+
+    st.session_state.orb_state = "idle"
+    st.rerun()
+
+# ─────────────────────────────────────────
+# LOW CONFIDENCE WARNING
+# ─────────────────────────────────────────
+conf = st.session_state.agent_state.get("confidence", 0.0)
+history = st.session_state.agent_state.get("history", [])
+if conf < -1.0 and st.session_state.orb_state == "idle" and history:
+    st.markdown(render_low_confidence_warning(), unsafe_allow_html=True)
+
+st.markdown(render_footer(), unsafe_allow_html=True)

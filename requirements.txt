@@ -1,7 +1,7 @@
-streamlit
-faster-whisper
-gtts
-langdetect
-google-generativeai
-pydub
-ffmpeg-python
+streamlit>=1.32.0
+streamlit-mic-recorder>=0.0.8
+faster-whisper>=1.0.0
+gtts>=2.5.0
+langgraph>=0.1.0
+requests>=2.31.0
+Pillow>=10.0.0
